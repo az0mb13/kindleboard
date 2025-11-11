@@ -1,8 +1,3 @@
-Perfect — this project absolutely deserves a polished, developer-friendly README.
-Here’s a complete, clean, and professional `README.md` tailored for your **Kindle Dashboard** project (v18).
-
----
-
 ## 🖥 Kindle Dashboard
 
 Transform your old Kindle into a minimalist **always-on productivity dashboard** — showing your Todoist tasks, recent security feeds, weather updates, battery status, and calendar, all rendered beautifully in grayscale.
