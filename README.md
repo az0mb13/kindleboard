@@ -2,7 +2,7 @@
 
 Transform your old Kindle into a minimalist **always-on productivity dashboard** — showing your Todoist tasks, recent security feeds, weather updates, battery status, and calendar, all rendered beautifully in grayscale.
 
-
+![Kindle Dashboard Preview](assets/sample.png)
 
 ---
 
