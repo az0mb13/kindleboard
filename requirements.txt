@@ -1,0 +1,4 @@
+Pillow
+requests
+feedparser
+python-dotenv
