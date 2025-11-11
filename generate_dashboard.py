@@ -1,26 +1,29 @@
 #!/usr/bin/env python3
-"""
-Kindle Dashboard v3.2
-Minimalist Todoist + Weather + Battery dashboard rendered as PNG,
-auto-uploaded and displayed on Kindle using /usr/sbin/eips.
-"""
 
-import os, sys, datetime, subprocess, requests
-from PIL import Image, ImageDraw, ImageFont
+import os, sys, datetime, calendar, subprocess, requests, feedparser
+from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageStat
+from dotenv import load_dotenv
 
 # ---------------------------------------------------------------------
 # CONFIGURATION
 # ---------------------------------------------------------------------
-KINDLE_HOST   = "192.168.15.244"                       # Kindle IP
-TODOIST_TOKEN = os.getenv("TODOIST_API_TOKEN")          # export TODOIST_API_TOKEN=...
-CITY          = "Bangalore"                             # for weather
-WIDTH, HEIGHT = 1072, 1448
+load_dotenv()
+KINDLE_HOST   = "192.168.15.244"
+TODOIST_TOKEN = os.getenv("TODOIST_API_TOKEN")
+CITY          = "Bangalore"
+WIDTH, HEIGHT = 1448, 1072
 OUTPUT_FILE   = "dashboard.png"
 
-# Fonts (macOS paths — update if needed)
-FONT_DIR      = "/System/Library/Fonts/Supplemental"
-FONT_BOLD     = os.path.join(FONT_DIR, "Arial Bold.ttf")
-FONT_REG      = os.path.join(FONT_DIR, "Arial.ttf")
+
+FONT_PATH = "/Users/zombie/projects/kindleboard/assets/fonts/DejaVuSans.ttf"
+ICON_DIR  = "/Users/zombie/projects/kindleboard/assets/icons"  # local folder for icons
+
+ICONS = {
+    "todo": os.path.join(ICON_DIR, "todo.png"),
+    "done": os.path.join(ICON_DIR, "completed.png"),
+    "security": os.path.join(ICON_DIR, "security.png"),
+    "calendar": os.path.join(ICON_DIR, "calendar.png"),
+}
 
 # ---------------------------------------------------------------------
 # FETCHERS
@@ -29,13 +32,10 @@ def fetch_todoist():
     if not TODOIST_TOKEN:
         print("❌ Missing TODOIST_API_TOKEN.")
         sys.exit(1)
-
     headers = {"Authorization": f"Bearer {TODOIST_TOKEN}"}
-    tasks = requests.get("https://api.todoist.com/rest/v2/tasks",
-                         headers=headers, timeout=10).json()
-    done  = requests.get("https://api.todoist.com/sync/v9/completed/get_all",
-                         headers=headers, timeout=10).json().get("items", [])
-    return tasks, done
+    tasks = requests.get("https://api.todoist.com/rest/v2/tasks", headers=headers, timeout=10).json()
+    done  = requests.get("https://api.todoist.com/sync/v9/completed/get_all", headers=headers, timeout=10).json().get("items", [])
+    return tasks, done[:5]
 
 def fetch_battery():
     try:
@@ -50,106 +50,292 @@ def fetch_battery():
 
 def fetch_weather():
     try:
-        return requests.get(f"https://wttr.in/{CITY}?format=%t+%C", timeout=6).text.strip()
-    except Exception:
-        return "N/A"
+        from dotenv import load_dotenv
+        load_dotenv()  # ensure environment vars are loaded
+
+        API_KEY = os.getenv("WEATHER_API_KEY")
+        CITY = "Bangalore"
+        if not API_KEY:
+            print("⚠️ Missing WEATHER_API_KEY in .env")
+            return None
+
+        url = f"http://api.weatherapi.com/v1/current.json?key={API_KEY}&q={CITY}&aqi=no"
+        resp = requests.get(url, timeout=10)
+        if resp.status_code != 200:
+            print(f"⚠️ Weather API returned HTTP {resp.status_code}: {resp.text[:200]}")
+            return None
+
+        data = resp.json()
+        if "current" not in data:
+            print(f"⚠️ Unexpected weather data format: {data}")
+            return None
+
+        current = data["current"]
+        condition = current.get("condition", {}).get("text", "Unknown")
+        temp = round(current.get("temp_c", 0))
+        humidity = current.get("humidity", 0)
+        icon_url = "https:" + current.get("condition", {}).get("icon", "")
+
+        # Download weather icon safely
+        icon_path = "/tmp/weather.png"
+        try:
+            icon = requests.get(icon_url, timeout=6)
+            with open(icon_path, "wb") as f:
+                f.write(icon.content)
+        except Exception as e:
+            print("⚠️ Could not download weather icon:", e)
+            icon_path = None
+
+        return {
+            "temp": temp,
+            "condition": condition,
+            "humidity": humidity,
+            "icon": icon_path
+        }
+
+    except Exception as e:
+        print("Weather fetch error:", e)
+        return None
+
+
+def fetch_security_feeds():
+    feeds = [
+        "https://blog.projectdiscovery.io/rss/",
+        "https://cvefeed.io/rss",
+        "https://www.exploit-db.com/rss.xml"
+    ]
+    items = []
+    try:
+        for url in feeds:
+            feed = feedparser.parse(url)
+            for entry in feed.entries[:1]:
+                title = entry.title.replace("\n", " ").strip()
+                items.append(f"• {title}")
+        if not items:
+            items = ["No new security updates."]
+    except Exception as e:
+        items = [f"Feed error: {e}"]
+    return items[:3]
+
+# ---------------------------------------------------------------------
+# DRAW HELPERS
+# ---------------------------------------------------------------------
+def draw_icon_with_text(draw, img, x, y, icon_path, label, font_text):
+    """Draws an icon (auto-adjusted for e-ink visibility) next to a label."""
+    try:
+        icon = Image.open(icon_path).convert("RGBA")
+        # Flatten transparency over white background
+        bg = Image.new("RGBA", icon.size, (255, 255, 255, 255))
+        icon = Image.alpha_composite(bg, icon).convert("L")
+
+        # Auto-detect brightness
+        brightness = ImageStat.Stat(icon).mean[0]
+        if brightness > 180:  # Likely white icon
+            icon = ImageOps.invert(icon)
+
+        # Optional: contrast enhance
+        icon = ImageOps.autocontrast(icon, cutoff=3)
+        icon = icon.resize((40, 40))
+
+        img.paste(icon, (x, y))
+        draw.text((x + 55, y + 6), label, font=font_text, fill=0)
+    except Exception as e:
+        print(f"⚠️ Icon render failed ({icon_path}): {e}")
+        draw.text((x, y), label, font=font_text, fill=0)
+
+
+
+def draw_calendar(draw, x, y, w, font_header, font_day, font_num):
+    """Draws a properly centered and evenly spaced monthly calendar."""
+    now = datetime.datetime.now()
+    month_name = now.strftime("%B %Y")
+
+    # Card layout
+    left, top = x, y
+    width = w - 80  # leave some padding on right edge
+    col_width = width // 7
+    row_height = 32
+
+    # Center the month name
+    month_width = draw.textlength(month_name, font=font_header)
+    month_x = left + (width - month_width) // 2
+    draw.text((month_x, top), month_name, font=font_header, fill=0)
+
+    # Weekday headers
+    weekdays = ["M", "T", "W", "T", "F", "S", "S"]
+    y_offset = top + 40
+    for i, wd in enumerate(weekdays):
+        wd_width = draw.textlength(wd, font=font_day)
+        wd_x = left + (col_width * i) + (col_width - wd_width) // 2
+        draw.text((wd_x, y_offset), wd, font=font_day, fill=0)
+
+    # Draw day numbers
+    cal = calendar.Calendar(firstweekday=0)
+    month_days = list(cal.itermonthdays(now.year, now.month))
+    y_offset += 30
+    col = 0
+    row = 0
+
+    for day in month_days:
+        if day == 0:
+            col += 1
+            continue
+        dx = left + (col_width * (col % 7)) + (col_width // 3)
+        dy = y_offset + (row * row_height)
+        if day == now.day:
+            draw.rectangle((dx - 10, dy - 3, dx + 25, dy + 25), fill=0)
+            draw.text((dx, dy), f"{day:2}", font=font_num, fill=255)
+        else:
+            draw.text((dx, dy), f"{day:2}", font=font_num, fill=0)
+        col += 1
+        if col % 7 == 0:
+            row += 1
+
 
 # ---------------------------------------------------------------------
 # DRAW DASHBOARD
 # ---------------------------------------------------------------------
-def draw_dashboard(tasks, done, battery, weather):
+def draw_dashboard(tasks, done, battery, weather, feeds):
     img = Image.new("L", (WIDTH, HEIGHT), 255)
     draw = ImageDraw.Draw(img)
 
-    header = ImageFont.truetype(FONT_BOLD, 42)
-    sub    = ImageFont.truetype(FONT_REG, 28)
-    text   = ImageFont.truetype(FONT_REG, 26)
-    small  = ImageFont.truetype(FONT_REG, 22)
+    # Fonts
+    title = ImageFont.truetype(FONT_PATH, 42)
+    header = ImageFont.truetype(FONT_PATH, 30)
+    sub = ImageFont.truetype(FONT_PATH, 26)
+    small = ImageFont.truetype(FONT_PATH, 20)
+    cal_font = ImageFont.truetype(FONT_PATH, 22)
 
     now = datetime.datetime.now()
-    y = 40
-    RIGHT_MARGIN = 50   # leave boundary on right side
+    PADDING = 40
+    DIVIDER_X = 900
+    CARD_SPACING = 25
+    CARD_RADIUS = 20
+    CARD_FILL = 240
+    CARD_OUTLINE = 180
 
-    # --- Header Bar ----------------------------------------------------
-    draw.rectangle((0, 0, WIDTH, 130), fill=240)
-    draw.text((40, 40), now.strftime("%A, %b %d"), font=header, fill=0)
+    # ---------------- HEADER ----------------
+    draw.rectangle((0, 0, WIDTH, 100), fill=235)
+    left_text = f"{now.strftime('%a, %b %d')}  •  {now.strftime('%I:%M %p')}"
+    draw.text((PADDING, 30), left_text, font=header, fill=0)
 
-    # Right-aligned header text (battery + weather)
-    right_text = f"{weather}   🔋 {battery}%"
-    text_width = draw.textlength(right_text, font=sub)
-    draw.text((WIDTH - text_width - RIGHT_MARGIN, 40),
-              right_text, font=sub, fill=0)
+    # Default starting point for right-aligned elements
+    right_x = WIDTH - 60
 
-    # --- Active Tasks --------------------------------------------------
-    y = 150
-    draw.text((40, y), "ACTIVE TASKS", font=header, fill=0)
-    y += 50
-    shown = 0
-    for t in tasks:
+    # Battery text (rightmost)
+    battery_text = f"[BAT: {battery}%]"
+    batt_width = draw.textlength(battery_text, font=sub)
+    right_x -= batt_width
+    draw.text((right_x, 34), battery_text, font=sub, fill=0)
+
+    # Add spacing before weather info
+    right_x -= 40
+
+    # Weather text block
+    if weather and isinstance(weather, dict):
+        weather_text = f"{weather['temp']}°C  {weather['condition']}  Hum {weather['humidity']}%"
+        weather_width = draw.textlength(weather_text, font=sub)
+        right_x -= weather_width
+        draw.text((right_x, 34), weather_text, font=sub, fill=0)
+
+        # Weather icon to the left of weather text
+        if os.path.exists(weather.get("icon", "")):
+            icon = Image.open(weather["icon"]).convert("L").resize((42, 42))
+            icon_x = right_x - 50  # leave some padding
+            img.paste(icon, (int(icon_x), 27))
+            right_x = icon_x - 20  # extra padding before icon
+    else:
+        weather_text = "Weather: N/A"
+        weather_width = draw.textlength(weather_text, font=sub)
+        right_x -= weather_width
+        draw.text((right_x, 34), weather_text, font=sub, fill=0)
+
+
+    # ---------------- LEFT PANEL ----------------
+    current_y = 130
+
+    # Todoist Card
+    box_top = current_y
+    box_bottom = box_top + 250
+    draw.rounded_rectangle((PADDING, box_top, DIVIDER_X - 60, box_bottom),
+                           radius=CARD_RADIUS, fill=CARD_FILL, outline=CARD_OUTLINE)
+    draw_icon_with_text(draw, img, PADDING + 30, box_top + 20, ICONS["todo"], "Todo List", title)
+    y = box_top + 70
+    for t in tasks[:6]:
         c = t.get("content", "").strip()
         if not c:
             continue
         due = ""
         if t.get("due") and t["due"].get("date"):
-            due = " (" + t["due"]["date"] + ")"
-        draw.text((60, y), "• " + c[:65] + due, font=text, fill=0)
-        y += 34
-        shown += 1
-        if shown >= 8:
-            break
+            due = f" ({t['due']['date']})"
+        draw.text((PADDING + 50, y), f"• {c[:60]}{due}", font=sub, fill=0)
+        y += 30
 
-    # --- Completed Tasks ----------------------------------------------
-    y += 20
-    draw.line((40, y, WIDTH-40, y), fill=0, width=1)
-    y += 25
-    draw.text((40, y), "COMPLETED (24h)", font=sub, fill=0)
-    y += 35
-    shown = 0
+    current_y = box_bottom + CARD_SPACING
+
+    # Completed Card
+    card_height = 120 + (len(done) * 30)
+    box_top = current_y
+    box_bottom = box_top + card_height
+    draw.rounded_rectangle((PADDING, box_top, DIVIDER_X - 60, box_bottom),
+                           radius=CARD_RADIUS, fill=CARD_FILL, outline=CARD_OUTLINE)
+    draw_icon_with_text(draw, img, PADDING + 30, box_top + 20, ICONS["done"], "Completed (Latest 5)", title)
+    y = box_top + 70
     for t in done:
         c = t.get("content", "").strip()
         if not c:
             continue
-        completed = t.get("completed_at")
-        if not completed:
-            continue
-        try:
-            dt = datetime.datetime.strptime(completed[:19], "%Y-%m-%dT%H:%M:%S")
-            if (datetime.datetime.utcnow() - dt).total_seconds() > 86400:
-                continue
-        except Exception:
-            continue
-        draw.text((60, y), f"[x] {c[:65]}", font=text, fill=128)
-        y += 30
-        shown += 1
-        if shown >= 5:
-            break
+        draw.text((PADDING + 50, y), f"☑ {c[:55]}", font=sub, fill=100)
+        y += 28
 
-    # --- Footer --------------------------------------------------------
-    y = HEIGHT - 70
-    draw.line((40, y, WIDTH-40, y), fill=0, width=1)
-    draw.text((40, y+10), "Updated: " + now.strftime("%H:%M"), font=small, fill=0)
+    current_y = box_bottom + CARD_SPACING
 
+    # Security Feeds Card
+    box_top = current_y
+    box_bottom = box_top + 180
+    draw.rounded_rectangle((PADDING, box_top, DIVIDER_X - 60, box_bottom),
+                           radius=CARD_RADIUS, fill=CARD_FILL, outline=CARD_OUTLINE)
+    draw_icon_with_text(draw, img, PADDING + 30, box_top + 20, ICONS["security"], "Security Feeds", title)
+    y = box_top + 70
+    for line in feeds:
+        draw.text((PADDING + 50, y), line[:85], font=sub, fill=0)
+        y += 28
+
+    # ---------------- RIGHT PANEL ----------------
+    draw.line((DIVIDER_X, 110, DIVIDER_X, HEIGHT - 60), fill=180, width=2)
+
+    # Calendar Card
+    box_top = 130
+    box_bottom = box_top + 320
+    draw.rounded_rectangle((DIVIDER_X + 30, box_top, WIDTH - 40, box_bottom),
+                           radius=CARD_RADIUS, fill=CARD_FILL, outline=CARD_OUTLINE)
+    draw_icon_with_text(draw, img, DIVIDER_X + 60, box_top + 20, ICONS["calendar"], "Calendar", title)
+    draw_calendar(draw, DIVIDER_X + 60, box_top + 70, WIDTH - (DIVIDER_X + 60),
+              font_header=header, font_day=small, font_num=cal_font)
+
+    # ---------------- FOOTER ----------------
+    draw.line((PADDING, HEIGHT - 60, WIDTH - PADDING, HEIGHT - 60), fill=180, width=1)
+    draw.text((PADDING, HEIGHT - 45),
+          f"Updated: {now.strftime('%I:%M %p')} | Dashboard v17 (Icon Edition)",
+          font=small, fill=0)
+
+    img = img.rotate(90, expand=True)
     img.save(OUTPUT_FILE)
-    print("✅ Dashboard PNG generated.")
+    print("✅ Dashboard v17 generated successfully.")
 
 # ---------------------------------------------------------------------
 # PUSH TO KINDLE
 # ---------------------------------------------------------------------
 def push_to_kindle():
-    print("📡 Uploading to Kindle...")
-    subprocess.run(["scp", OUTPUT_FILE,
-                    f"root@{KINDLE_HOST}:/mnt/us/dashboard.png"],
-                   check=True)
-    subprocess.run(["ssh", f"root@{KINDLE_HOST}",
-                    "/usr/sbin/eips", "-g", "/mnt/us/dashboard.png"],
-                   check=True)
-    print("✅ Display updated.")
+    subprocess.run(["scp", OUTPUT_FILE, f"root@{KINDLE_HOST}:/mnt/us/dashboard.png"], check=True)
+    subprocess.run(["ssh", f"root@{KINDLE_HOST}", "/usr/sbin/eips", "-g", "/mnt/us/dashboard.png"], check=True)
+    print("✅ Display updated on Kindle.")
 
 # ---------------------------------------------------------------------
 if __name__ == "__main__":
-    print("Fetching data...")
     tasks, done = fetch_todoist()
     battery = fetch_battery()
     weather = fetch_weather()
-    draw_dashboard(tasks, done, battery, weather)
+    feeds = fetch_security_feeds()
+    draw_dashboard(tasks, done, battery, weather, feeds)
     push_to_kindle()
