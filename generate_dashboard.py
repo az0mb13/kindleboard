@@ -22,13 +22,15 @@ from dotenv import load_dotenv
 # ---------------------------------------------------------------------
 load_dotenv()
 
-KINDLE_HOST = "192.168.15.244"
+KINDLE_HOST = "192.168.0.100"
 TODOIST_TOKEN = os.getenv("TODOIST_API_TOKEN")
 WEATHER_API_KEY = os.getenv("WEATHER_API_KEY")
 CITY = "Bangalore"
 
 WIDTH, HEIGHT = 1448, 1072
-OUTPUT_FILE = "dashboard.png"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_FILE = os.path.join(BASE_DIR, "dashboard.png")
+
 
 FONT_PATH = "/Users/zombie/projects/kindleboard/assets/fonts/DejaVuSans.ttf"
 ICON_DIR = "/Users/zombie/projects/kindleboard/assets/icons"
@@ -319,8 +321,21 @@ def draw_dashboard(tasks, done, battery, weather, feeds):
 # PUSH TO KINDLE
 # ---------------------------------------------------------------------
 def push_to_kindle():
-    subprocess.run(["scp", OUTPUT_FILE, f"root@{KINDLE_HOST}:/mnt/us/dashboard.png"], check=True)
-    subprocess.run(["ssh", f"root@{KINDLE_HOST}", "/usr/sbin/eips", "-g", "/mnt/us/dashboard.png"], check=True)
+    subprocess.run(["scp", OUTPUT_FILE, f"root@{KINDLE_HOST}:/mnt/us/linkss/screensavers/bg_ss00.png"], check=True)
+    # subprocess.run(["ssh", f"root@{KINDLE_HOST}", "/usr/sbin/eips", "-g", "/mnt/us/linkss/screensavers/dashboard.png"], check=True)
+    # Copy dashboard as Kindle screensaver
+    # subprocess.run([
+    #     "ssh", f"root@{KINDLE_HOST}",
+    #     "cp /mnt/us/dashboard.png /mnt/us/linkss/screensavers/dashboard.png"
+    # ], check=True)
+
+    # Force screensaver refresh (optional)
+    subprocess.run([
+        "ssh", f"root@{KINDLE_HOST}",
+        "lipc-set-prop com.lab126.powerd preventScreenSaver 0"
+    ], check=False)
+
+    print("✅ Dashboard pushed as Kindle screensaver.")
     print("✅ Display updated on Kindle.")
 
 # ---------------------------------------------------------------------
